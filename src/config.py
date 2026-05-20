@@ -18,4 +18,12 @@ RSI_MIN = 50.0
 
 TOP_N = 25
 REFRESH_SECONDS = 60
-BATCH_SIZE = 50
+BATCH_SIZE = 100
+
+# Pre-filter thresholds applied INSIDE scan() before the expensive per-ticker
+# P/E lookup. Anything outside these floors is dropped without hitting Yahoo's
+# fundamentals endpoint. Keep these generous — they only exist to avoid
+# wasting API budget on obviously uninteresting tickers.
+PREFILTER_RSI_MIN = 30.0
+PREFILTER_VOLUME_MIN = 1.0
+INTER_BATCH_SLEEP = 0.5

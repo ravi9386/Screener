@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
@@ -95,9 +96,11 @@ def _fetch_pe(symbol: str) -> float:
 
 
 SPARKLINE_DAYS = 30
+_EMPTY_COLUMNS = ["ticker", "price", "pe", "volume_ratio", "rsi", "sparkline"]
 
 
-def _row_for_symbol(symbol: str, hist: pd.DataFrame) -> dict | None:
+def _compute_indicators(symbol: str, hist: pd.DataFrame) -> dict | None:
+    """Cheap, fully local — no API calls. Returns a row without P/E."""
     if hist is None or hist.empty or "Close" not in hist or "Volume" not in hist:
         return None
     close = hist["Close"].dropna()
@@ -110,11 +113,10 @@ def _row_for_symbol(symbol: str, hist: pd.DataFrame) -> dict | None:
     if np.isnan(rsi) or np.isnan(vol_ratio):
         return None
 
-    pe = _fetch_pe(symbol)
     return {
         "ticker": symbol,
         "price": float(close.iloc[-1]),
-        "pe": pe,
+        "pe": float("nan"),  # filled in later, only for prefilter survivors
         "volume_ratio": vol_ratio,
         "rsi": rsi,
         "sparkline": close.iloc[-SPARKLINE_DAYS:].tolist(),
@@ -122,33 +124,56 @@ def _row_for_symbol(symbol: str, hist: pd.DataFrame) -> dict | None:
 
 
 def scan(symbols: Iterable[str]) -> pd.DataFrame:
-    """Pull history, compute indicators for every ticker, return one row per usable ticker.
+    """Pull history, compute indicators, lazily fetch P/E only for prefilter survivors.
 
-    No filtering or ranking is done here — the UI applies thresholds so changing
-    a slider does not trigger a re-fetch.
+    Pipeline:
+      1. Bulk-download OHLCV (batched, with a small inter-batch sleep).
+      2. Compute RSI + volume_ratio entirely from OHLCV (no API).
+      3. Drop anything below the generous prefilter floors (RSI/volume).
+      4. Fetch P/E ONLY for the survivors — typically ~5% of the universe.
+
+    The expensive per-ticker `.info` call is the main rate-limit pressure
+    on Yahoo, so step 4 cuts API surface ~20× vs. fetching P/E for everyone.
+
+    The UI applies the user's full filter thresholds on the returned frame,
+    so slider changes never trigger a re-fetch within the cache TTL.
     """
     symbols = list(symbols)
+
+    # Phase 1: bulk OHLCV
     histories: dict[str, pd.DataFrame] = {}
     for i in range(0, len(symbols), config.BATCH_SIZE):
         chunk = symbols[i : i + config.BATCH_SIZE]
         histories.update(_download_history(chunk))
+        if i + config.BATCH_SIZE < len(symbols):
+            time.sleep(config.INTER_BATCH_SLEEP)
 
-    rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {
-            pool.submit(_row_for_symbol, sym, histories.get(sym)): sym
-            for sym in symbols
-        }
-        for fut in as_completed(futures):
-            row = fut.result()
-            if row is not None:
-                rows.append(row)
+    # Phase 2 + 3: compute indicators, drop weak signals
+    candidates: list[dict] = []
+    for sym in symbols:
+        row = _compute_indicators(sym, histories.get(sym))
+        if row is None:
+            continue
+        if row["rsi"] < config.PREFILTER_RSI_MIN:
+            continue
+        if row["volume_ratio"] < config.PREFILTER_VOLUME_MIN:
+            continue
+        candidates.append(row)
 
-    if not rows:
-        return pd.DataFrame(
-            columns=["ticker", "price", "pe", "volume_ratio", "rsi", "sparkline"]
-        )
-    return pd.DataFrame(rows)
+    if not candidates:
+        return pd.DataFrame(columns=_EMPTY_COLUMNS)
+
+    # Phase 4: fetch P/E only for prefilter survivors
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        future_to_row = {pool.submit(_fetch_pe, row["ticker"]): row for row in candidates}
+        for fut in as_completed(future_to_row):
+            row = future_to_row[fut]
+            try:
+                row["pe"] = fut.result()
+            except Exception:
+                row["pe"] = float("nan")
+
+    return pd.DataFrame(candidates)
 
 
 def filter_and_rank(
