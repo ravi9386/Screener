@@ -10,6 +10,17 @@ import yfinance as yf
 
 from . import config
 
+# Yahoo Finance blocks unauthenticated requests from datacenter IPs (Streamlit
+# Cloud, Render, AWS, etc.) with HTTP 401. Routing yfinance through a
+# curl_cffi session that impersonates Chrome bypasses most of those blocks.
+# Falls back to default requests if curl_cffi isn't available.
+try:
+    from curl_cffi import requests as _cffi_requests
+
+    _SESSION = _cffi_requests.Session(impersonate="chrome")
+except Exception:  # pragma: no cover - graceful fallback for local dev
+    _SESSION = None
+
 
 def load_universe(csv_path: Path) -> list[str]:
     df = pd.read_csv(csv_path)
@@ -43,7 +54,7 @@ def volume_ratio(volume: pd.Series, window: int = config.VOLUME_AVG_WINDOW) -> f
 
 def _download_history(symbols: list[str]) -> dict[str, pd.DataFrame]:
     """Batch-download OHLCV. Returns a dict keyed by symbol."""
-    data = yf.download(
+    kwargs = dict(
         tickers=symbols,
         period=config.HISTORY_LOOKBACK,
         interval="1d",
@@ -52,6 +63,9 @@ def _download_history(symbols: list[str]) -> dict[str, pd.DataFrame]:
         progress=False,
         threads=True,
     )
+    if _SESSION is not None:
+        kwargs["session"] = _SESSION
+    data = yf.download(**kwargs)
     out: dict[str, pd.DataFrame] = {}
     if isinstance(data.columns, pd.MultiIndex):
         for sym in symbols:
@@ -67,7 +81,8 @@ def _download_history(symbols: list[str]) -> dict[str, pd.DataFrame]:
 
 def _fetch_pe(symbol: str) -> float:
     try:
-        info = yf.Ticker(symbol).info or {}
+        ticker = yf.Ticker(symbol, session=_SESSION) if _SESSION is not None else yf.Ticker(symbol)
+        info = ticker.info or {}
     except Exception:
         return float("nan")
     pe = info.get("trailingPE")
