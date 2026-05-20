@@ -182,15 +182,26 @@ def filter_and_rank(
     volume_multiplier_min: float,
     rsi_min: float,
     top_n: int,
+    require_pe: bool = False,
 ) -> pd.DataFrame:
-    """Apply screening thresholds and return the top N ranked by RSI desc."""
+    """Apply screening thresholds and return the top N ranked by RSI desc.
+
+    When `require_pe=False` (default), tickers whose P/E lookup failed (NaN)
+    still pass the filter — only tickers that actually have P/E data are
+    constrained by `pe_max`. This is the realistic mode for cloud-hosted
+    deployments where Yahoo's fundamentals endpoint is unreliable.
+
+    When `require_pe=True`, strict mode: any ticker without P/E is dropped.
+    """
     if df.empty:
         return df
-    mask = (
-        df["pe"].notna()
-        & (df["pe"] > 0)
-        & (df["pe"] < pe_max)
-        & (df["volume_ratio"] > volume_multiplier_min)
-        & (df["rsi"] > rsi_min)
-    )
+
+    has_valid_pe = df["pe"].notna() & (df["pe"] > 0) & (df["pe"] < pe_max)
+    if require_pe:
+        pe_mask = has_valid_pe
+    else:
+        # Lax: accept NaN/zero/missing P/E too. Only constrain rows that have it.
+        pe_mask = has_valid_pe | df["pe"].isna() | (df["pe"] <= 0)
+
+    mask = pe_mask & (df["volume_ratio"] > volume_multiplier_min) & (df["rsi"] > rsi_min)
     return df[mask].sort_values("rsi", ascending=False).head(top_n).reset_index(drop=True)

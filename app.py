@@ -33,6 +33,15 @@ with st.sidebar:
     )
     rsi_min = st.slider("RSI min", min_value=30.0, max_value=90.0, value=float(config.RSI_MIN), step=1.0)
     top_n = st.slider("Show top", min_value=5, max_value=100, value=config.TOP_N, step=5)
+    require_pe = st.toggle(
+        "Strict P/E (drop tickers with no P/E data)",
+        value=False,
+        help=(
+            "Yahoo Finance's fundamentals endpoint is unreliable on cloud hosts. "
+            "Leave OFF to let tickers without P/E data still appear (P/E filter "
+            "only applies when data is available). Turn ON for strict screening."
+        ),
+    )
 
     st.header("Refresh")
     auto_refresh = st.toggle("Auto-refresh every 60s", value=True)
@@ -67,7 +76,14 @@ def render_once() -> None:
     raw = cached_scan(universe_name, tuple(symbols))
     elapsed = time.time() - started
 
-    df = filter_and_rank(raw, pe_max=pe_max, volume_multiplier_min=vol_min, rsi_min=rsi_min, top_n=top_n)
+    df = filter_and_rank(
+        raw,
+        pe_max=pe_max,
+        volume_multiplier_min=vol_min,
+        rsi_min=rsi_min,
+        top_n=top_n,
+        require_pe=require_pe,
+    )
 
     with status_slot:
         if raw.empty:
@@ -87,11 +103,15 @@ def render_once() -> None:
         display = df.copy()
         display.insert(0, "rank", range(1, len(display) + 1))
         display["price"] = display["price"].round(2)
+        # P/E may be NaN when Yahoo's fundamentals endpoint refuses the request.
+        # Keep it as a float column so column_config can format it; Streamlit
+        # renders NaN as a blank cell, which reads cleanly as "no data".
         display["pe"] = display["pe"].round(2)
         display["volume_ratio"] = display["volume_ratio"].round(2)
         display["rsi"] = display["rsi"].round(2)
         display = display[["rank", "ticker", "price", "pe", "volume_ratio", "rsi", "sparkline"]]
         display.columns = ["Rank", "Ticker", "Price", "P/E", "Vol Ratio", "RSI", "30d Price"]
+        pe_coverage = df["pe"].notna().sum()
 
         with table_slot:
             st.dataframe(
@@ -117,8 +137,18 @@ def render_once() -> None:
                         format="%.2fx",
                     ),
                     "Price": st.column_config.NumberColumn("Price", format="%.2f"),
-                    "P/E": st.column_config.NumberColumn("P/E", format="%.2f"),
+                    "P/E": st.column_config.NumberColumn(
+                        "P/E",
+                        help="Trailing P/E from Yahoo. Blank = unavailable (Yahoo blocks fundamentals on cloud IPs).",
+                        format="%.2f",
+                    ),
                 },
+            )
+        if pe_coverage < len(df):
+            st.caption(
+                f"ℹ️ P/E available for {pe_coverage}/{len(df)} matches — Yahoo's fundamentals "
+                f"endpoint is unreliable on cloud hosts. Toggle **Strict P/E** in the sidebar "
+                f"to drop tickers without P/E data."
             )
     else:
         table_slot.empty()
