@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from src import config
+from src import screener as screener_module
 from src.screener import filter_and_rank, load_universe, scan
 
 st.set_page_config(
@@ -76,14 +77,31 @@ def render_once() -> None:
     raw = cached_scan(universe_name, tuple(symbols))
     elapsed = time.time() - started
 
-    df = filter_and_rank(
-        raw,
-        pe_max=pe_max,
-        volume_multiplier_min=vol_min,
-        rsi_min=rsi_min,
-        top_n=top_n,
-        require_pe=require_pe,
-    )
+    try:
+        df = filter_and_rank(
+            raw,
+            pe_max=pe_max,
+            volume_multiplier_min=vol_min,
+            rsi_min=rsi_min,
+            top_n=top_n,
+            require_pe=require_pe,
+        )
+    except TypeError:
+        # Streamlit Cloud is serving a stale cached version of src.screener
+        # that doesn't have the require_pe kwarg yet. Fall back to the old
+        # signature so the dashboard stays alive while you delete + redeploy.
+        st.error(
+            "⚠️ Streamlit Cloud is running stale bytecode for src/screener.py. "
+            "Click **Manage app → ⋯ → Delete app**, then re-deploy from the same "
+            "repo. The build shown in the footer below is the live one."
+        )
+        df = filter_and_rank(
+            raw,
+            pe_max=pe_max,
+            volume_multiplier_min=vol_min,
+            rsi_min=rsi_min,
+            top_n=top_n,
+        )
 
     with status_slot:
         if raw.empty:
@@ -155,9 +173,10 @@ def render_once() -> None:
 
 
 render_once()
+_screener_version = getattr(screener_module, "__version__", "pre-0.3.0 (STALE)")
 footer_slot.caption(
-    f"Auto-refresh: {'ON' if auto_refresh else 'OFF'}  •  Cache TTL: {config.REFRESH_SECONDS}s  •  "
-    f"Sliders re-filter instantly — only the scan itself respects the cache."
+    f"Build v{_screener_version}  •  Auto-refresh: {'ON' if auto_refresh else 'OFF'}  •  "
+    f"Cache TTL: {config.REFRESH_SECONDS}s  •  Sliders re-filter instantly — only the scan itself respects the cache."
 )
 
 if auto_refresh:

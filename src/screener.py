@@ -11,6 +11,11 @@ import yfinance as yf
 
 from . import config
 
+# Version sentinel — bump on every push so the UI can prove which build is live.
+# If the footer shows an older value than expected, Streamlit Cloud is serving
+# stale bytecode; do a full delete+redeploy of the app.
+__version__ = "0.3.0"
+
 # Yahoo Finance blocks unauthenticated requests from datacenter IPs (Streamlit
 # Cloud, Render, AWS, etc.) with HTTP 401. Routing yfinance through a
 # curl_cffi session that impersonates Chrome bypasses most of those blocks.
